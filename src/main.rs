@@ -1,33 +1,29 @@
-use std::{collections::HashMap, future::Future, time::Duration};
-
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
+use axum::routing::get;
+use axum::Router;
 use hydra::{
-    Application, ChildSpec, GenServer, GenServerOptions, Message, Node, Pid, Process, Receivable,
-    Registry, RegistryOptions, SupervisionStrategy, Supervisor, SupervisorOptions,
+    Application, ChildSpec, GenServer, GenServerOptions, Message, Pid, Process, Registry,
+    RegistryOptions, SupervisionStrategy, Supervisor, SupervisorOptions,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::Duration;
+mod api;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum MapMessage {
     All,
-    Add(String, String),
+    Add(String, serde_value::Value),
     Delete(String),
     Get(String),
-    AllResult(HashMap<String, String>),
-    Result(Option<String>),
+    AllResult(HashMap<String, serde_value::Value>),
+    Result(Option<serde_value::Value>),
     Timer,
 }
 
 #[derive(Debug, Default)]
 struct MapServer {
     name: String,
-    state: HashMap<String, String>,
+    state: HashMap<String, serde_value::Value>,
 }
 
 impl GenServer for MapServer {
@@ -65,14 +61,18 @@ impl GenServer for MapServer {
     async fn handle_cast(&mut self, message: Self::Message) -> Result<(), hydra::ExitReason> {
         match message {
             MapMessage::Timer => {
-                let time = self.state.get("_timer").cloned().unwrap_or(String::new());
+                // let time = self.state.get("_timer").cloned().unwrap_or(serde_value::Value::Unit);
                 // dbg!(time);
                 // dbg!(Process::whereis(&self.name));
                 let x = self
                     .state
                     .entry("_timer".to_string())
-                    .or_insert(String::from("0"));
-                *x = (x.parse::<i32>().unwrap() + 1).to_string();
+                    .or_insert(serde_value::Value::I32(0));
+                let serde_value::Value::I32(y) = x else {
+                    panic!()
+                };
+
+                *y += 1;
 
                 Self::cast_after(
                     Process::current(),
@@ -116,7 +116,14 @@ pub struct HttpServer {
 impl HttpServer {
     pub async fn init(map_name: String) {
         let app = Router::new()
-            .route("/", get(root))
+            .route("/", get(api::root))
+            .route("/api", get(api::get_state))
+            .route(
+                "/api/:key",
+                get(api::get_value)
+                    .put(api::put_value)
+                    .delete(api::delete_value),
+            )
             .with_state(HttpServer { map_name });
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -130,50 +137,6 @@ impl HttpServer {
     pub fn child_spec(map_name: String) -> ChildSpec {
         ChildSpec::new("HttpServer").start(move || Self::spawn_link(map_name.clone()))
     }
-}
-
-async fn root(State(state): State<HttpServer>) -> Response {
-    let map_name = state.map_name.clone();
-    // let (tx, rx) = tokio::sync::oneshot::channel();
-    // Process::spawn(async move {
-    //     let out = if let Some(pid) = Process::whereis(&map_name) {
-    //         match MapServer::call(pid, MapMessage::All, None).await {
-    //             Ok(MapMessage::AllResult(value)) => serde_json::to_string(&value).unwrap().into_response(),
-    //             _ => (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
-    //         }
-    //     } else {
-    //         (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
-    //     };
-
-    //     tx.send(out).unwrap();
-    // });
-
-    // rx.await.unwrap()
-
-    run_in_process(async move {
-        if let Some(pid) = Process::whereis(&map_name) {
-            match MapServer::call(pid, MapMessage::All, None).await {
-                Ok(MapMessage::AllResult(value)) => {
-                    serde_json::to_string(&value).unwrap().into_response()
-                }
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
-            }
-        } else {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
-        }
-    })
-    .await
-}
-
-async fn run_in_process<T: std::fmt::Debug + Send + 'static>(
-    f: impl Future<Output = T> + Send + 'static,
-) -> T {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    Process::spawn(async {
-        tx.send(f.await).unwrap();
-    });
-
-    rx.await.unwrap()
 }
 
 struct MyApp;
